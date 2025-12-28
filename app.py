@@ -16,7 +16,7 @@ MODEL_NAME = "intfloat/multilingual-e5-small"
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-app = FastAPI(title="BAAK AI Service", version="2.0")
+app = FastAPI(title="BAAK AI Service", version="2.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -58,9 +58,9 @@ def load_resources():
     print("⏳ [Init] Menghubungkan ke Groq Cloud...")
     groq_client = Groq(api_key=GROQ_API_KEY)
     
-    print("✅ [Ready] Sistem BAAK AI Siap Melayani!")
+    print("✅ [Ready] BAAK Assistant Siap Melayani!")
 
-def retrieve_knowledge(query: str, top_k: int = 20):
+def retrieve_knowledge(query: str, top_k: int = 25): # Naikkan top_k agar data table lebih lengkap
     if not vector_db_collection:
         return []
 
@@ -89,53 +89,56 @@ def chat_with_baak(request: ChatRequest):
     user_query = request.question
     
     print(f"\n🔍 [User Query]: {user_query}")
-    context_docs = retrieve_knowledge(user_query, top_k=20)
+    context_docs = retrieve_knowledge(user_query, top_k=25)
     
     sources = [doc['source'] for doc in context_docs]
     
-    if not context_docs:
-        return ChatResponse(
-            answer="Mohon maaf, sistem database BAAK belum siap atau tidak menemukan data terkait.",
-            sources=[]
-        )
-
+    # Context Builder
     context_text = ""
     for doc in context_docs:
-        context_text += f"- [{doc['type'].upper()}] {doc['content']} (File: {doc['source']})\n"
+        context_text += f"- [{doc['type'].upper()}] {doc['content']} (Source: {doc['source']})\n"
 
+    # --- SYSTEM PROMPT BARU ---
     system_prompt = """
-    Kamu adalah Asisten Virtual Cerdas untuk BAAK (Biro Administrasi Akademik) Universitas Gunadarma.
-    
-    TUGAS UTAMA:
-    Jawab pertanyaan mahasiswa berdasarkan KONTEKS DATA yang disediakan di bawah ini.
-    
-    ATURAN MENJAWAB:
-    1. JANGAN HALUSINASI. Jika informasi tidak ada di konteks, katakan "Maaf, data tidak tersedia".
-    2. JIKA DITANYA JADWAL LENGKAP: Sebutkan SEMUA mata kuliah yang ada di dalam konteks untuk kelas tersebut. Jangan disingkat.
-    3. JIKA DITANYA JADWAL SPESIFIK: Hanya sebutkan mata kuliah yang ditanyakan saja.
-    4. BEDAKAN JADWAL: Perhatikan baik-baik apakah konteksnya "Jadwal UTS" atau "Jadwal Kuliah/Kelas". Jangan tertukar.
-    5. GAYA BAHASA: Formal, sopan, tapi luwes (seperti Customer Service profesional).
-    6. FORMATTING: Gunakan Bullet Points atau Tabel markdown agar jadwal mudah dibaca.
-    """
+    PERAN & IDENTITAS:
+    Kamu adalah 'BAAK Assistant', asisten virtual cerdas resmi untuk Biro Administrasi Akademik (BAAK) Universitas Gunadarma.
 
-    user_prompt = f"""
-    Pertanyaan User: "{user_query}"
+    DESKRIPSI DIRI:
+    Jika user bertanya "Siapa kamu?", "Apa fungsi AI ini?", atau pertanyaan sejenis, jawablah:
+    "Saya adalah BAAK Assistant, AI yang dirancang untuk membantu mahasiswa Universitas Gunadarma mendapatkan informasi jadwal kuliah, jadwal UTS, kalender akademik, dan layanan administrasi secara cepat dan akurat."
+
+    ATURAN & ETIS (PENTING):
+    1. FILTER KATA KASAR: Jika user menggunakan kata kasar, jorok, atau memaki, JANGAN berikan informasi. Cukup respon: "Mohon maaf, tolong gunakan bahasa yang sopan agar saya dapat membantu Anda dengan baik."
+    2. ANTI-HALUSINASI: Hanya jawab berdasarkan DATA KONTEKS di bawah. Jika data tidak ada, katakan jujur "Maaf, data tidak ditemukan dalam database saya."
+
+    ATURAN FORMATTING (WAJIB DIPATUHI):
+    1. FORMAT TABLE UNTUK JADWAL: 
+       Setiap kali menampilkan Jadwal Kuliah atau Jadwal UTS, kamu WAJIB menampilkannya dalam bentuk TABLE MARKDOWN.
+       Format Kolom Table: | Hari | Pukul | Mata Kuliah | Dosen | Ruang | Kelas |
     
-    DATA KONTEKS DARI DATABASE BAAK:
-    {context_text}
+    2. PENGURUTAN (SORTING):
+       Data dalam table WAJIB diurutkan berdasarkan:
+       Prioritas 1: HARI (Senin, Selasa, Rabu, Kamis, Jumat, Sabtu)
+       Prioritas 2: WAKTU/JAM (Pagi ke Sore)
     
-    Silakan jawab pertanyaan user berdasarkan data di atas.
+    3. DETIL LENGKAP:
+       Jangan menyingkat nama mata kuliah jika informasinya tersedia.
+
+    DATA KONTEKS DARI DATABASE:
+    """ + context_text + """
+    
+    Silakan jawab pertanyaan user berdasarkan instruksi di atas.
     """
 
     try:
         chat_completion = groq_client.chat.completions.create(
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                {"role": "user", "content": user_query}
             ],
             model="llama-3.3-70b-versatile", 
-            temperature=0.3,
-            max_tokens=1024
+            temperature=0.3, # Rendah agar taat aturan table
+            max_tokens=2048  # Diperbesar agar table tidak terpotong
         )
         
         bot_answer = chat_completion.choices[0].message.content
@@ -148,6 +151,6 @@ def chat_with_baak(request: ChatRequest):
     except Exception as e:
         print(f"❌ Error Groq API: {e}")
         return ChatResponse(
-            answer="Maaf, sedang terjadi gangguan pada koneksi ke otak AI. Silakan coba sesaat lagi.",
+            answer="Maaf, sedang terjadi gangguan pada sistem otak AI kami. Silakan coba beberapa saat lagi.",
             sources=[]
         )

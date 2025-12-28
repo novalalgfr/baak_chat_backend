@@ -2,14 +2,14 @@ import json
 import os
 import chromadb
 from sentence_transformers import SentenceTransformer
-from tqdm import tqdm 
+from tqdm import tqdm
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, '..', 'data') 
+DATA_DIR = os.path.join(BASE_DIR, '..', 'data')
 DB_PATH = os.path.join(BASE_DIR, 'chroma_db')
 
 COLLECTION_NAME = "baak_knowledge"
-MODEL_NAME = "intfloat/multilingual-e5-small" 
+MODEL_NAME = "intfloat/multilingual-e5-small"
 
 def load_data_from_json():
     print(f"[*] Membaca data dari: {DATA_DIR}")
@@ -34,7 +34,6 @@ def load_data_from_json():
             continue
 
         if isinstance(data, dict) and ("kalender_akademik" in data or "layanan_loket" in data):
-            
             if "kalender_akademik" in data:
                 for idx, item in enumerate(data["kalender_akademik"]):
                     kegiatan = item.get('kegiatan', 'Kegiatan Akademik')
@@ -68,10 +67,13 @@ def load_data_from_json():
             ids.append(filename)
 
         elif isinstance(data, list) and len(data) > 0 and "hari" in data[0]:
-            kelas_id = filename.replace("jadwal_kuliah_", "").replace("jadwal_uts_", "").replace(".json", "")
-            jenis = "UTS" if "uts" in filename else "Kuliah"
+            jenis_jadwal = "UTS" if "uts" in filename.lower() else "Kuliah"
+            default_kelas_id = filename.replace("jadwal_kuliah_", "").replace("jadwal_uts_", "").replace(".json", "")
 
             for idx, item in enumerate(data):
+                kelas_spesifik = item.get('kelas', default_kelas_id)
+                prefix_kelas = kelas_spesifik[:3] if len(kelas_spesifik) >= 3 else kelas_spesifik
+
                 tanggal = item.get('tanggal', '') 
                 hari = item.get('hari', 'N/A')
                 waktu = item.get('waktu', 'N/A')
@@ -80,14 +82,24 @@ def load_data_from_json():
                 dosen = item.get('dosen', 'N/A')
                 
                 text_content = (
-                    f"{matkul}. "
-                    f"Dosen: {dosen}. "
-                    f"Kelas: {kelas_id}. "
-                    f"Jadwal {jenis}: Hari {hari}, Tanggal {tanggal}, Pukul {waktu}, di Ruang {ruang}."
+                    f"Jadwal {jenis_jadwal} untuk Kelas {kelas_spesifik} (dan seluruh kelas awalan {prefix_kelas}). "
+                    f"Mata Kuliah: {matkul}. "
+                    f"Dosen Pengajar: {dosen}. "
+                    f"Waktu: Hari {hari}, Tanggal {tanggal}, Pukul {waktu}. "
+                    f"Lokasi: Ruang {ruang}. "
+                    f"Catatan: Jadwal {prefix_kelas}01 berlaku sama untuk semua kelas dengan awalan {prefix_kelas}."
                 )
                 
                 documents.append(f"passage: {text_content}")
-                metadatas.append({"source": filename, "type": "jadwal", "kelas": kelas_id})
+                metadatas.append({
+                    "source": filename, 
+                    "type": "jadwal", 
+                    "kategori": jenis_jadwal,
+                    "kelas_spesifik": kelas_spesifik,
+                    "kelas_prefix": prefix_kelas,
+                    "dosen": dosen,
+                    "matkul": matkul
+                })
                 ids.append(f"{filename}_{idx}")
 
         elif isinstance(data, list) and len(data) > 0 and ("link_pdf" in data[0] or "url" in data[0]):
@@ -135,7 +147,6 @@ def main():
         )
 
     print("\n✅ SUKSES! Database BAAK sudah diperbarui.")
-    print("   Sekarang AI sudah tahu tentang Kalender Akademik, Jadwal, dan Layanan Loket.")
 
 if __name__ == "__main__":
     main()
