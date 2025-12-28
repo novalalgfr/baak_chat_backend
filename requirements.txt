@@ -1,0 +1,8 @@
+chromadb
+sentence-transformers
+numpy<2.0
+tqdm
+fastapi
+uvicorn
+pydantic
+groq
