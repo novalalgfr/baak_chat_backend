@@ -1,6 +1,6 @@
 import os
 import chromadb
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 from groq import Groq
@@ -13,10 +13,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'chroma_db')
 COLLECTION_NAME = "baak_knowledge"
 MODEL_NAME = "intfloat/multilingual-e5-small"
-
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-app = FastAPI(title="BAAK AI Service", version="2.1")
+app = FastAPI(title="BAAK AI Service", version="2.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -41,26 +40,22 @@ class ChatResponse(BaseModel):
 def load_resources():
     global embedding_model, vector_db_collection, groq_client
     
-    print("⏳ [Init] Memuat Embedding Model (multilingual-e5-small)...")
     embedding_model = SentenceTransformer(MODEL_NAME)
     
-    print("⏳ [Init] Menghubungkan ke Vector DB (ChromaDB)...")
     if os.path.exists(DB_PATH):
         client = chromadb.PersistentClient(path=DB_PATH)
         try:
             vector_db_collection = client.get_collection(COLLECTION_NAME)
-            print(f"   -> Terhubung ke koleksi: {COLLECTION_NAME}")
+            print("Connected to ChromaDB collection.")
         except:
-            print("   -> ⚠️ Koleksi tidak ditemukan. Harap jalankan 'build_db.py' dahulu.")
+            print("Collection not found. Please run build_db.py first.")
     else:
-        print("   -> ⚠️ Database belum dibuat. Harap jalankan 'build_db.py' dahulu.")
+        print("Database path not found. Please run build_db.py first.")
     
-    print("⏳ [Init] Menghubungkan ke Groq Cloud...")
     groq_client = Groq(api_key=GROQ_API_KEY)
-    
-    print("✅ [Ready] BAAK Assistant Siap Melayani!")
+    print("BAAK Assistant Ready!")
 
-def retrieve_knowledge(query: str, top_k: int = 25): # Naikkan top_k agar data table lebih lengkap
+def retrieve_knowledge(query: str, top_k: int = 30):
     if not vector_db_collection:
         return []
 
@@ -80,55 +75,46 @@ def retrieve_knowledge(query: str, top_k: int = 25): # Naikkan top_k agar data t
             documents.append({
                 "content": clean_content,
                 "source": meta.get('source', 'unknown'),
-                "type": meta.get('type', 'unknown')
+                "type": meta.get('type', 'unknown'),
+                "hari_sort": meta.get('hari_sort', 99),
+                "waktu_sort": meta.get('waktu_sort', 99)
             })
+    
+    documents.sort(key=lambda x: (x['hari_sort'], x['waktu_sort']))
+    
     return documents
 
 @app.post("/chat", response_model=ChatResponse)
 def chat_with_baak(request: ChatRequest):
     user_query = request.question
+    print(f"\nUser Query: {user_query}")
     
-    print(f"\n🔍 [User Query]: {user_query}")
-    context_docs = retrieve_knowledge(user_query, top_k=25)
-    
+    context_docs = retrieve_knowledge(user_query, top_k=30)
     sources = [doc['source'] for doc in context_docs]
     
-    # Context Builder
     context_text = ""
     for doc in context_docs:
-        context_text += f"- [{doc['type'].upper()}] {doc['content']} (Source: {doc['source']})\n"
+        context_text += f"- {doc['content']} (File: {doc['source']})\n"
 
-    # --- SYSTEM PROMPT BARU ---
     system_prompt = """
-    PERAN & IDENTITAS:
-    Kamu adalah 'BAAK Assistant', asisten virtual cerdas resmi untuk Biro Administrasi Akademik (BAAK) Universitas Gunadarma.
+    PERAN:
+    Kamu adalah 'BAAK Assistant', AI resmi BAAK Universitas Gunadarma.
 
-    DESKRIPSI DIRI:
-    Jika user bertanya "Siapa kamu?", "Apa fungsi AI ini?", atau pertanyaan sejenis, jawablah:
-    "Saya adalah BAAK Assistant, AI yang dirancang untuk membantu mahasiswa Universitas Gunadarma mendapatkan informasi jadwal kuliah, jadwal UTS, kalender akademik, dan layanan administrasi secara cepat dan akurat."
-
-    ATURAN & ETIS (PENTING):
-    1. FILTER KATA KASAR: Jika user menggunakan kata kasar, jorok, atau memaki, JANGAN berikan informasi. Cukup respon: "Mohon maaf, tolong gunakan bahasa yang sopan agar saya dapat membantu Anda dengan baik."
-    2. ANTI-HALUSINASI: Hanya jawab berdasarkan DATA KONTEKS di bawah. Jika data tidak ada, katakan jujur "Maaf, data tidak ditemukan dalam database saya."
-
-    ATURAN FORMATTING (WAJIB DIPATUHI):
-    1. FORMAT TABLE UNTUK JADWAL: 
-       Setiap kali menampilkan Jadwal Kuliah atau Jadwal UTS, kamu WAJIB menampilkannya dalam bentuk TABLE MARKDOWN.
-       Format Kolom Table: | Hari | Pukul | Mata Kuliah | Dosen | Ruang | Kelas |
+    ATURAN FORMATTING (WAJIB TABLE):
+    Jika memberikan jadwal (Kuliah/UTS), WAJIB gunakan TABLE MARKDOWN:
+    | Hari | Pukul | Mata Kuliah | Dosen | Ruang | Kelas |
     
-    2. PENGURUTAN (SORTING):
-       Data dalam table WAJIB diurutkan berdasarkan:
-       Prioritas 1: HARI (Senin, Selasa, Rabu, Kamis, Jumat, Sabtu)
-       Prioritas 2: WAKTU/JAM (Pagi ke Sore)
-    
-    3. DETIL LENGKAP:
-       Jangan menyingkat nama mata kuliah jika informasinya tersedia.
+    ATURAN URUTAN:
+    Data jadwal yang saya berikan di bawah SUDAH TERURUT (Senin->Sabtu, Pagi->Sore).
+    TOLONG JANGAN MENGUBAH URUTANNYA saat kamu membuat tabel. Salin sesuai urutan data konteks.
 
-    DATA KONTEKS DARI DATABASE:
-    """ + context_text + """
-    
-    Silakan jawab pertanyaan user berdasarkan instruksi di atas.
-    """
+    ATURAN KONTEN:
+    1. Jadwal Kuliah Reguler BERBEDA per kelas. JANGAN menyamakan jadwal kuliah kecuali untuk UTS.
+    2. Jika user tanya jadwal Dosen, cari nama dosen tersebut di semua hari.
+    3. Jika data tidak ada, katakan jujur.
+
+    DATA KONTEKS (SUDAH TERURUT):
+    """ + context_text
 
     try:
         chat_completion = groq_client.chat.completions.create(
@@ -136,9 +122,9 @@ def chat_with_baak(request: ChatRequest):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_query}
             ],
-            model="llama-3.3-70b-versatile", 
-            temperature=0.3, # Rendah agar taat aturan table
-            max_tokens=2048  # Diperbesar agar table tidak terpotong
+            model="llama-3.1-8b-instant", 
+            temperature=0.2,
+            max_tokens=2048
         )
         
         bot_answer = chat_completion.choices[0].message.content
@@ -149,8 +135,8 @@ def chat_with_baak(request: ChatRequest):
         )
 
     except Exception as e:
-        print(f"❌ Error Groq API: {e}")
+        print(f"Error: {e}")
         return ChatResponse(
-            answer="Maaf, sedang terjadi gangguan pada sistem otak AI kami. Silakan coba beberapa saat lagi.",
+            answer="Maaf, sedang terjadi gangguan pada sistem.",
             sources=[]
         )
