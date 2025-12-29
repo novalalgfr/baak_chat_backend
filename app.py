@@ -15,7 +15,7 @@ COLLECTION_NAME = "baak_knowledge"
 MODEL_NAME = "intfloat/multilingual-e5-small"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-app = FastAPI(title="BAAK AI Service", version="2.2")
+app = FastAPI(title="BAAK AI Service", version="2.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -77,10 +77,15 @@ def retrieve_knowledge(query: str, top_k: int = 30):
                 "source": meta.get('source', 'unknown'),
                 "type": meta.get('type', 'unknown'),
                 "hari_sort": meta.get('hari_sort', 99),
-                "waktu_sort": meta.get('waktu_sort', 99)
+                "waktu_sort": meta.get('waktu_sort', 99),
+                "tanggal_sort": meta.get('tanggal_sort', 0)
             })
     
-    documents.sort(key=lambda x: (x['hari_sort'], x['waktu_sort']))
+    # SORTING LOGIC:
+    # 1. Tanggal (YYYYMMDD) -> Utama untuk UTS
+    # 2. Hari (1-7) -> Utama untuk Jadwal Reguler (yang tanggalnya 0)
+    # 3. Waktu -> Penentu jam
+    documents.sort(key=lambda x: (x['tanggal_sort'], x['hari_sort'], x['waktu_sort']))
     
     return documents
 
@@ -100,12 +105,19 @@ def chat_with_baak(request: ChatRequest):
     PERAN:
     Kamu adalah 'BAAK Assistant', AI resmi BAAK Universitas Gunadarma.
 
-    ATURAN FORMATTING (WAJIB TABLE):
-    Jika memberikan jadwal (Kuliah/UTS), WAJIB gunakan TABLE MARKDOWN:
-    | Hari | Pukul | Mata Kuliah | Dosen | Ruang | Kelas |
+    ATURAN FORMATTING UTAMA:
+    1. JADWAL (Kuliah/UTS): WAJIB gunakan TABLE MARKDOWN.
+       Format: | Hari | Pukul | Mata Kuliah | Dosen | Ruang | Kelas |
     
+    2. DOKUMEN & LINK PDF (PENTING!):
+       Jika di dalam data konteks terdapat link download atau URL (http/https), kamu WAJIB menyertakannya.
+       Gunakan format Markdown Link agar bisa diklik:
+       Format: [Judul Dokumen](URL_LINK_DISINI)
+       
+       JANGAN PERNAH menyebut judul dokumen tanpa memberikan link-nya jika link tersebut tersedia di data konteks.
+
     ATURAN URUTAN:
-    Data jadwal yang saya berikan di bawah SUDAH TERURUT (Senin->Sabtu, Pagi->Sore).
+    Data jadwal yang saya berikan di bawah SUDAH TERURUT (Berdasarkan Tanggal & Hari).
     TOLONG JANGAN MENGUBAH URUTANNYA saat kamu membuat tabel. Salin sesuai urutan data konteks.
 
     ATURAN KONTEN:
@@ -122,7 +134,7 @@ def chat_with_baak(request: ChatRequest):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_query}
             ],
-            model="llama-3.1-8b-instant", 
+            model="llama-3.3-70b-versatile", 
             temperature=0.2,
             max_tokens=2048
         )
