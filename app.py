@@ -15,7 +15,7 @@ COLLECTION_NAME = "baak_knowledge"
 MODEL_NAME = "intfloat/multilingual-e5-small"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-app = FastAPI(title="BAAK AI Service", version="2.4-Stable")
+app = FastAPI(title="BAAK AI Service", version="3.5-Ultimate")
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,8 +56,7 @@ def load_resources():
     groq_client = Groq(api_key=GROQ_API_KEY)
     print("✅ BAAK Assistant Ready!")
 
-def retrieve_knowledge(query: str, top_k: int = 25):
-    # Note: top_k dikurangi sedikit (30 -> 25) untuk mengurangi noise jadwal lain (Masalah #1)
+def retrieve_knowledge(query: str, top_k: int = 30):
     if not vector_db_collection:
         return []
 
@@ -71,19 +70,22 @@ def retrieve_knowledge(query: str, top_k: int = 25):
     documents = []
     if results['documents']:
         for i in range(len(results['documents'][0])):
-            clean_content = results['documents'][0][i].replace("passage: ", "")
+            raw_content = results['documents'][0][i]
             meta = results['metadatas'][0][i]
+            
+            clean_content = raw_content.replace("passage: ", "")
             
             documents.append({
                 "content": clean_content,
                 "source": meta.get('source', 'unknown'),
-                "type": meta.get('type', 'unknown'),
+                "type": meta.get('type', 'general'),
+                "kategori": meta.get('kategori', 'Umum'),
+                "topik": meta.get('topik', ''),
                 "hari_sort": meta.get('hari_sort', 99),
-                "waktu_sort": meta.get('waktu_sort', 99),
+                "waktu_sort": meta.get('waktu_sort', 9999),
                 "tanggal_sort": meta.get('tanggal_sort', 0)
             })
     
-    # Sorting Logic (Tetap dipertahankan karena sudah bagus)
     documents.sort(key=lambda x: (x['tanggal_sort'], x['hari_sort'], x['waktu_sort']))
     
     return documents
@@ -93,8 +95,8 @@ def chat_with_baak(request: ChatRequest):
     user_query = request.question
     print(f"\nUser Query: {user_query}")
     
-    context_docs = retrieve_knowledge(user_query, top_k=25)
-    sources = [doc['source'] for doc in context_docs]
+    context_docs = retrieve_knowledge(user_query, top_k=30)
+    sources = list(set([doc['source'] for doc in context_docs]))
     
     if not context_docs:
         return ChatResponse(
@@ -104,43 +106,55 @@ def chat_with_baak(request: ChatRequest):
 
     context_text = ""
     for doc in context_docs:
-        context_text += f"- {doc['content']} (Sumber: {doc['source']})\n"
+        label = doc['kategori']
+        if doc['topik']:
+            label += f" - {doc['topik']}"
+            
+        context_text += f"[{label}]\n{doc['content']}\n\n"
 
     system_prompt = """
+    PERAN:
     Kamu adalah 'BAAK Assistant', AI resmi BAAK Universitas Gunadarma.
-
-    TUGAS:
-    Jawab pertanyaan mahasiswa dengan TEPAT berdasarkan DATA KONTEKS yang diberikan.
+    Tugasmu adalah menjawab pertanyaan mahasiswa berdasarkan DATA KONTEKS yang diberikan.
 
     ATURAN LOGIKA (WAJIB DIPATUHI):
-    
     1. **PEMISAHAN JADWAL:**
        - Jika user bertanya "Jadwal Kuliah" (Reguler), HANYA ambil data jadwal kelas biasa. JANGAN masukan data UTS/Ujian kecuali diminta.
-       - Jika user bertanya "Jadwal UTS", HANYA ambil data ujian.
-       - Jika data jadwal bercampur di konteks, filterlah secara cerdas.
+       - Jika user bertanya "Jadwal UTS", HANYA ambil data ujian yang ada Tanggal-nya.
+       - Jika data jadwal bercampur di konteks, filterlah sesuai pertanyaan user.
     
     2. **PROSEDUR & ADMINISTRASI:**
-       - Jika pertanyaan tentang "Cara", "Syarat", "Prosedur", atau "Jam Buka", rangkum teks narasi menjadi FORMAT LIST (Bullet Points) atau TABEL sederhana agar mudah dibaca.
-       - Jangan menolak menjawab jika datanya berbentuk teks narasi (bukan tabel). Baca dan pahami isinya.
+       - Jika pertanyaan tentang "Cara", "Syarat", "Prosedur", rangkum teks narasi menjadi FORMAT LIST (Bullet Points) atau TABEL sederhana agar mudah dibaca.
+       - Baca detail prosedur dari data konteks dengan teliti.
     
     3. **NEGOSIASI DATA:**
-       - Jika user mencari X (misal: "Lihat Nilai"), tapi data yang ada hanya Y (misal: "Komplain Nilai"), JANGAN jawab "Tidak Tahu".
+       - Jika user mencari X tapi hanya ada Y, JANGAN jawab "Tidak Tahu".
        - Jawab: "Maaf, info spesifik [X] tidak ada, tapi saya punya info [Y] yang mungkin membantu: ..." lalu jelaskan [Y].
 
-    4. **LINK DOWNLOAD:**
-       - Jika di konteks ada URL/Link PDF, WAJIB ditampilkan.
-       - Format: [Nama Dokumen](URL).
+    ATURAN FORMATTING & TATA LETAK (STRICT):
+    1. **STRUKTUR JAWABAN:**
+       - Gunakan **Heading 3 (###)** untuk memisahkan bagian (Contoh: ### Prosedur, ### Syarat, ### Download).
+       - Gunakan Bullet Points (-) untuk rincian.
 
-    FORMATTING OUTPUT:
-    - **Jadwal/Jam Buka:** Gunakan TABLE MARKDOWN.
-      | Hari | Pukul | Kegiatan/Matkul | Ruang/Keterangan |
-    - **Prosedur:** Gunakan Bullet Points.
-    - **Gaya Bahasa:** Formal, Ramah, Solutif. Jika ada kata kasar dari user, tegur dengan sopan.
+    2. **JIKA JADWAL KULIAH REGULER:**
+       - Format: | Hari | Pukul | Mata Kuliah | Dosen | Ruang | Kelas |
+       - **DILARANG** membuat kolom 'Tanggal' untuk kuliah reguler.
     
-    DESKRIPSI DIRI:
-    Jika ditanya "Tentang apa ai ini?", jawab bahwa kamu adalah asisten untuk informasi jadwal dan administrasi akademik BAAK.
+    3. **JIKA JADWAL UTS / UJIAN:**
+       - Format: | Hari | Tanggal | Pukul | Mata Kuliah | Dosen | Ruang | Kelas |
+       - Wajib ada kolom 'Tanggal'.
 
-    DATA KONTEKS (SUDAH TERURUT SECARA KRONOLOGIS):
+    4. **ATURAN URUTAN (SORTING):**
+       - Data konteks yang saya berikan SUDAH TERURUT (Pagi -> Sore).
+       - Kamu **DILARANG MENGUBAH URUTAN BARIS** dalam tabel. Salin persis urutan baris dari data konteks.
+
+    5. **DOKUMEN & LINK (CRITICAL):**
+       - Jika di data konteks ada URL/Link PDF, kamu WAJIB menampilkannya.
+       - Format: - [Nama Dokumen](URL_LINK)
+       - **ANTI-BROKEN LINK:** Jika URL mengandung spasi, kamu WAJIB menggantinya dengan %20 (Contoh: '.../Administrasi Akademik/...' menjadi '.../Administrasi%20Akademik/...').
+       - Jangan menyuruh cek website jika link sudah tersedia di konteks.
+
+    DATA KONTEKS (SUDAH TERURUT):
     """ + context_text
 
     try:
@@ -149,8 +163,8 @@ def chat_with_baak(request: ChatRequest):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_query}
             ],
-            model="openai/gpt-oss-120b", 
-            temperature=0.3,
+            model="llama-3.3-70b-versatile",
+            temperature=0.3, 
             max_tokens=2048
         )
         
@@ -158,12 +172,12 @@ def chat_with_baak(request: ChatRequest):
         
         return ChatResponse(
             answer=bot_answer,
-            sources=list(set(sources))
+            sources=sources
         )
 
     except Exception as e:
         print(f"Error Groq: {e}")
         return ChatResponse(
-            answer="Maaf, sedang terjadi gangguan koneksi ke otak AI.",
+            answer="Maaf, sedang terjadi gangguan koneksi ke server AI.",
             sources=[]
         )
