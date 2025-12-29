@@ -15,7 +15,7 @@ COLLECTION_NAME = "baak_knowledge"
 MODEL_NAME = "intfloat/multilingual-e5-small"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-app = FastAPI(title="BAAK AI Service", version="2.3")
+app = FastAPI(title="BAAK AI Service", version="2.4-Stable")
 
 app.add_middleware(
     CORSMiddleware,
@@ -40,22 +40,24 @@ class ChatResponse(BaseModel):
 def load_resources():
     global embedding_model, vector_db_collection, groq_client
     
+    print("⏳ [Init] Loading Resources...")
     embedding_model = SentenceTransformer(MODEL_NAME)
     
     if os.path.exists(DB_PATH):
         client = chromadb.PersistentClient(path=DB_PATH)
         try:
             vector_db_collection = client.get_collection(COLLECTION_NAME)
-            print("Connected to ChromaDB collection.")
+            print("✅ Connected to ChromaDB.")
         except:
-            print("Collection not found. Please run build_db.py first.")
+            print("⚠️ Collection not found. Run 'build_db.py' first.")
     else:
-        print("Database path not found. Please run build_db.py first.")
+        print("⚠️ Database path missing. Run 'build_db.py' first.")
     
     groq_client = Groq(api_key=GROQ_API_KEY)
-    print("BAAK Assistant Ready!")
+    print("✅ BAAK Assistant Ready!")
 
-def retrieve_knowledge(query: str, top_k: int = 30):
+def retrieve_knowledge(query: str, top_k: int = 25):
+    # Note: top_k dikurangi sedikit (30 -> 25) untuk mengurangi noise jadwal lain (Masalah #1)
     if not vector_db_collection:
         return []
 
@@ -81,10 +83,7 @@ def retrieve_knowledge(query: str, top_k: int = 30):
                 "tanggal_sort": meta.get('tanggal_sort', 0)
             })
     
-    # SORTING LOGIC:
-    # 1. Tanggal (YYYYMMDD) -> Utama untuk UTS
-    # 2. Hari (1-7) -> Utama untuk Jadwal Reguler (yang tanggalnya 0)
-    # 3. Waktu -> Penentu jam
+    # Sorting Logic (Tetap dipertahankan karena sudah bagus)
     documents.sort(key=lambda x: (x['tanggal_sort'], x['hari_sort'], x['waktu_sort']))
     
     return documents
@@ -94,38 +93,54 @@ def chat_with_baak(request: ChatRequest):
     user_query = request.question
     print(f"\nUser Query: {user_query}")
     
-    context_docs = retrieve_knowledge(user_query, top_k=30)
+    context_docs = retrieve_knowledge(user_query, top_k=25)
     sources = [doc['source'] for doc in context_docs]
     
+    if not context_docs:
+        return ChatResponse(
+            answer="Mohon maaf, saya tidak menemukan informasi terkait di database saat ini.",
+            sources=[]
+        )
+
     context_text = ""
     for doc in context_docs:
-        context_text += f"- {doc['content']} (File: {doc['source']})\n"
+        context_text += f"- {doc['content']} (Sumber: {doc['source']})\n"
 
     system_prompt = """
-    PERAN:
     Kamu adalah 'BAAK Assistant', AI resmi BAAK Universitas Gunadarma.
 
-    ATURAN FORMATTING UTAMA:
-    1. JADWAL (Kuliah/UTS): WAJIB gunakan TABLE MARKDOWN.
-       Format: | Hari | Pukul | Mata Kuliah | Dosen | Ruang | Kelas |
+    TUGAS:
+    Jawab pertanyaan mahasiswa dengan TEPAT berdasarkan DATA KONTEKS yang diberikan.
+
+    ATURAN LOGIKA (WAJIB DIPATUHI):
     
-    2. DOKUMEN & LINK PDF (PENTING!):
-       Jika di dalam data konteks terdapat link download atau URL (http/https), kamu WAJIB menyertakannya.
-       Gunakan format Markdown Link agar bisa diklik:
-       Format: [Judul Dokumen](URL_LINK_DISINI)
-       
-       JANGAN PERNAH menyebut judul dokumen tanpa memberikan link-nya jika link tersebut tersedia di data konteks.
+    1. **PEMISAHAN JADWAL:**
+       - Jika user bertanya "Jadwal Kuliah" (Reguler), HANYA ambil data jadwal kelas biasa. JANGAN masukan data UTS/Ujian kecuali diminta.
+       - Jika user bertanya "Jadwal UTS", HANYA ambil data ujian.
+       - Jika data jadwal bercampur di konteks, filterlah secara cerdas.
+    
+    2. **PROSEDUR & ADMINISTRASI:**
+       - Jika pertanyaan tentang "Cara", "Syarat", "Prosedur", atau "Jam Buka", rangkum teks narasi menjadi FORMAT LIST (Bullet Points) atau TABEL sederhana agar mudah dibaca.
+       - Jangan menolak menjawab jika datanya berbentuk teks narasi (bukan tabel). Baca dan pahami isinya.
+    
+    3. **NEGOSIASI DATA:**
+       - Jika user mencari X (misal: "Lihat Nilai"), tapi data yang ada hanya Y (misal: "Komplain Nilai"), JANGAN jawab "Tidak Tahu".
+       - Jawab: "Maaf, info spesifik [X] tidak ada, tapi saya punya info [Y] yang mungkin membantu: ..." lalu jelaskan [Y].
 
-    ATURAN URUTAN:
-    Data jadwal yang saya berikan di bawah SUDAH TERURUT (Berdasarkan Tanggal & Hari).
-    TOLONG JANGAN MENGUBAH URUTANNYA saat kamu membuat tabel. Salin sesuai urutan data konteks.
+    4. **LINK DOWNLOAD:**
+       - Jika di konteks ada URL/Link PDF, WAJIB ditampilkan.
+       - Format: [Nama Dokumen](URL).
 
-    ATURAN KONTEN:
-    1. Jadwal Kuliah Reguler BERBEDA per kelas. JANGAN menyamakan jadwal kuliah kecuali untuk UTS.
-    2. Jika user tanya jadwal Dosen, cari nama dosen tersebut di semua hari.
-    3. Jika data tidak ada, katakan jujur.
+    FORMATTING OUTPUT:
+    - **Jadwal/Jam Buka:** Gunakan TABLE MARKDOWN.
+      | Hari | Pukul | Kegiatan/Matkul | Ruang/Keterangan |
+    - **Prosedur:** Gunakan Bullet Points.
+    - **Gaya Bahasa:** Formal, Ramah, Solutif. Jika ada kata kasar dari user, tegur dengan sopan.
+    
+    DESKRIPSI DIRI:
+    Jika ditanya "Tentang apa ai ini?", jawab bahwa kamu adalah asisten untuk informasi jadwal dan administrasi akademik BAAK.
 
-    DATA KONTEKS (SUDAH TERURUT):
+    DATA KONTEKS (SUDAH TERURUT SECARA KRONOLOGIS):
     """ + context_text
 
     try:
@@ -134,8 +149,8 @@ def chat_with_baak(request: ChatRequest):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_query}
             ],
-            model="llama-3.3-70b-versatile", 
-            temperature=0.2,
+            model="openai/gpt-oss-120b", 
+            temperature=0.3,
             max_tokens=2048
         )
         
@@ -147,8 +162,8 @@ def chat_with_baak(request: ChatRequest):
         )
 
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error Groq: {e}")
         return ChatResponse(
-            answer="Maaf, sedang terjadi gangguan pada sistem.",
+            answer="Maaf, sedang terjadi gangguan koneksi ke otak AI.",
             sources=[]
         )

@@ -5,7 +5,7 @@ from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, '..', 'data')
+DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, '..', 'data'))
 DB_PATH = os.path.join(BASE_DIR, 'chroma_db')
 
 COLLECTION_NAME = "baak_knowledge"
@@ -31,13 +31,11 @@ def get_waktu_sort(waktu_str):
         return 99
 
 def get_tanggal_sort(tanggal_str):
-    """Mengubah format '8 Mei 2025' atau '08-05-2025' menjadi integer 20250508"""
     if not tanggal_str or tanggal_str.lower() in ["", "n/a", "tanggal belum ditentukan"]:
         return 0
 
     clean_str = tanggal_str.lower().strip()
     
-    # Coba Format: DD-MM-YYYY / DD/MM/YYYY
     try:
         clean_str = clean_str.replace('/', '-')
         parts = clean_str.split('-')
@@ -46,7 +44,6 @@ def get_tanggal_sort(tanggal_str):
     except:
         pass
 
-    # Coba Format: DD Bulan YYYY
     try:
         parts = clean_str.split(' ')
         if len(parts) >= 3:
@@ -81,7 +78,7 @@ def load_data_from_json():
         except:
             continue
 
-        # --- TIPE 1: JADWAL (KULIAH / UTS) ---
+        # --- LOGIC 1: JADWAL KULIAH / UTS (Structure-Based) ---
         if isinstance(data, list) and len(data) > 0 and "hari" in data[0]:
             jenis_jadwal = "UTS" if "uts" in filename.lower() else "Kuliah"
             default_kelas_id = filename.replace("jadwal_kuliah_", "").replace("jadwal_uts_", "").replace(".json", "")
@@ -97,18 +94,16 @@ def load_data_from_json():
                 matkul = item.get('mata_kuliah', 'N/A')
                 dosen = item.get('dosen', 'N/A')
 
-                # Sorting Metadata Calculation
                 hari_score = HARI_MAPPING.get(hari.lower(), 99)
                 waktu_score = get_waktu_sort(waktu)
                 tanggal_score = get_tanggal_sort(tanggal)
 
                 if jenis_jadwal == "UTS":
                     text_content = (
-                        f"Jadwal {jenis_jadwal} untuk Kelas {kelas_spesifik} (dan seluruh kelas awalan {prefix_kelas}). "
+                        f"Jadwal {jenis_jadwal} untuk Kelas {kelas_spesifik} (Prefix: {prefix_kelas}). "
                         f"Mata Kuliah: {matkul}. Dosen: {dosen}. "
                         f"Waktu: Hari {hari}, Tanggal {tanggal}, Pukul {waktu}. "
-                        f"Lokasi: Ruang {ruang}. "
-                        f"Catatan: Jadwal UTS {prefix_kelas}01 berlaku sama untuk angkatan {prefix_kelas}."
+                        f"Lokasi: Ruang {ruang}."
                     )
                 else:
                     text_content = (
@@ -121,62 +116,75 @@ def load_data_from_json():
                 documents.append(f"passage: {text_content}")
                 
                 metadatas.append({
-                    "source": filename, 
+                    "source": filename.replace('.json', ''), 
                     "type": "jadwal", 
                     "kategori": jenis_jadwal,
                     "kelas_spesifik": kelas_spesifik,
-                    "kelas_prefix": prefix_kelas,
-                    "dosen": dosen,
-                    "matkul": matkul,
                     "hari_sort": hari_score,
                     "waktu_sort": waktu_score,
                     "tanggal_sort": tanggal_score
                 })
                 ids.append(f"{filename}_{idx}")
 
-        # --- TIPE 2: KALENDER & LOKET ---
+        # --- LOGIC 2: KALENDER & LOKET (Dictionary-Based) ---
         elif isinstance(data, dict) and ("kalender_akademik" in data or "layanan_loket" in data):
+            
             if "kalender_akademik" in data:
                 for idx, item in enumerate(data["kalender_akademik"]):
                     kegiatan = item.get('kegiatan', 'Kegiatan Akademik')
                     tanggal = item.get('tanggal', 'Tanggal belum ditentukan')
-                    text_content = f"Kalender Akademik: {kegiatan} dilaksanakan pada tanggal {tanggal}."
+                    
+                    text_content = f"Informasi Kalender Akademik: {kegiatan} akan dilaksanakan pada tanggal {tanggal}."
                     
                     documents.append(f"passage: {text_content}")
                     metadatas.append({
-                        "source": filename, "type": "kalender", "topik": kegiatan, 
+                        "source": filename.replace('.json', ''), 
+                        "type": "kalender", 
                         "hari_sort": 0, "waktu_sort": 0, "tanggal_sort": 0
                     })
                     ids.append(f"kalender_{idx}")
 
             if "layanan_loket" in data:
-                jam_layanan = [item.get('waktu') for item in data["layanan_loket"] if item.get('waktu')]
-                if jam_layanan:
-                    jam_str = ", ".join(jam_layanan)
-                    text_content = f"Informasi Jam Operasional Layanan Loket BAAK: {jam_str}."
-                    
-                    documents.append(f"passage: {text_content}")
-                    metadatas.append({
-                        "source": filename, "type": "loket", 
-                        "hari_sort": 0, "waktu_sort": 0, "tanggal_sort": 0
-                    })
-                    ids.append("loket_info")
+                jam_str_list = []
+                for item in data['layanan_loket']:
+                    if item.get('hari') and item.get('waktu'):
+                        jam_str_list.append(f"- Hari {item['hari']}: {item['waktu']}")
+                
+                full_schedule = "\n".join(jam_str_list)
+                text_content = (
+                    f"Informasi Jam Operasional dan Jadwal Buka Loket BAAK Universitas Gunadarma:\n"
+                    f"{full_schedule}"
+                )
 
-        # --- TIPE 3: PDF / LINKS ---
+                documents.append(f"passage: {text_content}")
+                metadatas.append({
+                    "source": filename.replace('.json', ''), 
+                    "type": "loket", 
+                    "hari_sort": 0, "waktu_sort": 0, "tanggal_sort": 0
+                })
+                ids.append("loket_info_combined")
+
+        # --- LOGIC 3: PDF LINKS & DOKUMEN (List-Based) ---
         elif isinstance(data, list) and len(data) > 0 and ("link_pdf" in data[0] or "url" in data[0]):
             for idx, item in enumerate(data):
-                judul = item.get('judul') or item.get('jurusan') or item.get('nama') or "Dokumen"
+                judul = item.get('judul') or item.get('jurusan') or "Dokumen"
                 link = item.get('link_pdf') or item.get('url') or "#"
-                text_content = f"Tersedia dokumen PDF tentang '{judul}'. Link download: {link}"
+                
+                text_content = (
+                    f"Topik: Download Dokumen Resmi {judul}.\n"
+                    f"Keterangan: Tersedia file PDF untuk dokumen {judul}.\n"
+                    f"Link Download: {link}"
+                )
                 
                 documents.append(f"passage: {text_content}")
                 metadatas.append({
-                    "source": filename, "type": "dokumen", 
+                    "source": filename.replace('.json', ''), 
+                    "type": "dokumen", 
                     "hari_sort": 0, "waktu_sort": 0, "tanggal_sort": 0
                 })
                 ids.append(f"{filename}_{idx}")
 
-        # --- TIPE 4: GENERAL INFO / PROSEDUR ---
+        # --- LOGIC 4: PROSEDUR & GENERAL INFO (Fallback) ---
         else:
             items_to_process = []
             if isinstance(data, dict) and "judul" in data:
@@ -188,29 +196,23 @@ def load_data_from_json():
                 for idx, item in enumerate(items_to_process):
                     judul = item.get('judul', 'Informasi Umum')
                     
-                    deskripsi = ""
-                    if item.get('deskripsi'):
-                        if isinstance(item['deskripsi'], list):
-                            deskripsi = " ".join([str(d) for d in item['deskripsi']])
-                        else:
-                            deskripsi = str(item['deskripsi'])
-                            
-                    prosedur = ""
-                    if item.get('prosedur'):
-                        if isinstance(item['prosedur'], list):
-                            prosedur = " ".join([str(p) for p in item['prosedur']])
-                        else:
-                            prosedur = str(item['prosedur'])
+                    desc_raw = item.get('deskripsi', [])
+                    deskripsi = " ".join([str(d) for d in desc_raw]) if isinstance(desc_raw, list) else str(desc_raw)
+                    
+                    pros_raw = item.get('prosedur', [])
+                    prosedur = " ".join([str(p) for p in pros_raw]) if isinstance(pros_raw, list) else str(pros_raw)
 
                     text_content = (
                         f"Topik Panduan: {judul}.\n"
                         f"Penjelasan: {deskripsi}\n"
-                        f"Langkah/Prosedur: {prosedur}"
+                        f"Langkah-langkah / Prosedur: {prosedur}"
                     )
 
                     documents.append(f"passage: {text_content}")
                     metadatas.append({
-                        "source": filename, "type": "prosedur", "title": judul,
+                        "source": filename.replace('.json', ''), 
+                        "type": "prosedur",
+                        "title": judul,
                         "hari_sort": 0, "waktu_sort": 0, "tanggal_sort": 0
                     })
                     ids.append(f"{filename}_topik_{idx}")
@@ -218,11 +220,11 @@ def load_data_from_json():
     return documents, metadatas, ids
 
 def main():
-    print("\n🚀 STARTING BAAK AI TRAINING...")
+    print("\n🚀 STARTING BAAK AI DATABASE BUILDER (MATURE VERSION)...")
     docs, metas, ids = load_data_from_json()
     
     if not docs:
-        print("❌ No documents found.")
+        print("❌ No documents found in data directory.")
         return
 
     print(f"\n[*] Initializing ChromaDB at: {DB_PATH}")
@@ -234,14 +236,14 @@ def main():
 
     collection = client.create_collection(name=COLLECTION_NAME)
 
-    print("[*] Loading Embedding Model...")
+    print(f"[*] Loading Embedding Model ({MODEL_NAME})...")
     model = SentenceTransformer(MODEL_NAME)
     
-    print("[*] Generating Embeddings...")
+    print(f"[*] Generating Embeddings for {len(docs)} items...")
     embeddings = model.encode(docs, show_progress_bar=True).tolist()
 
     batch_size = 100
-    print("[*] Inserting into Database...")
+    print("[*] Inserting into Vector Database...")
     for i in range(0, len(docs), batch_size):
         collection.add(
             documents=docs[i:i+batch_size],
@@ -250,7 +252,7 @@ def main():
             ids=ids[i:i+batch_size]
         )
 
-    print("\n✅ SUCCESS! Database updated with Date Sorting logic.")
+    print("\n✅ SUCCESS! Database built successfully with Enhanced Semantic Logic.")
 
 if __name__ == "__main__":
     main()
