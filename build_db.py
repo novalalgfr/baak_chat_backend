@@ -1,16 +1,14 @@
 import json
 import os
 import shutil
+import sys
 import chromadb
+import torch
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, '..', 'data'))
-DB_PATH = os.path.join(BASE_DIR, 'chroma_db')
-
-COLLECTION_NAME = "baak_knowledge"
-MODEL_NAME = "intfloat/multilingual-e5-small"
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from app.core.config import MODEL_NAME, DB_PATH, COLLECTION_NAME, DATA_DIR
 
 HARI_MAPPING = {
     "senin": 1, "selasa": 2, "rabu": 3, "kamis": 4, "jumat": 5, "sabtu": 6, "minggu": 7,
@@ -79,42 +77,25 @@ def load_data_from_json():
                     waktu = item.get('waktu', 'N/A')
                     ruang = item.get('ruang', 'N/A')
                     tanggal = item.get('tanggal', '')
-                    
                     dosen = item.get('dosen')
                     dosen_str = f"Dosen: {dosen}. " if dosen else "" 
 
-                    hari_score = HARI_MAPPING.get(hari.lower(), 99)
-                    waktu_score = get_waktu_sort(waktu)
-                    tanggal_score = get_tanggal_sort(tanggal)
+                    text_content = (
+                        f"Jadwal {jenis_jadwal} {('Kelas ' + kelas) if jenis_jadwal == 'UTS' else 'Reguler Kelas ' + kelas}. "
+                        f"Mata Kuliah: {matkul}. {dosen_str}"
+                        f"Waktu: Hari {hari}, {('Tanggal ' + tanggal + ', ') if tanggal else ''}Pukul {waktu}. "
+                        f"Lokasi: Ruang {ruang}. ({kategori_utama})"
+                    )
 
-                    if jenis_jadwal == "UTS":
-                        text_content = (
-                            f"Jadwal {jenis_jadwal} Kelas {kelas}. "
-                            f"Mata Kuliah: {matkul}. "
-                            f"{dosen_str}"
-                            f"Waktu: Hari {hari}, Tanggal {tanggal}, Pukul {waktu}. "
-                            f"Lokasi: Ruang {ruang}. "
-                            f"({kategori_utama})"
-                        )
-                    else:
-                        text_content = (
-                            f"Jadwal {jenis_jadwal} Reguler Kelas {kelas}. "
-                            f"Mata Kuliah: {matkul}. "
-                            f"{dosen_str}"
-                            f"Waktu: Hari {hari}, Pukul {waktu}. "
-                            f"Lokasi: Ruang {ruang}. "
-                            f"({kategori_utama})"
-                        )
-
-                    documents.append(f"passage: {text_content}")
+                    documents.append(text_content)
                     metadatas.append({
                         "source": filename,
                         "type": "jadwal",
                         "kategori": kategori_utama,
                         "kelas": kelas,
-                        "hari_sort": hari_score,
-                        "waktu_sort": waktu_score,
-                        "tanggal_sort": tanggal_score
+                        "hari_sort": HARI_MAPPING.get(hari.lower(), 99),
+                        "waktu_sort": get_waktu_sort(waktu),
+                        "tanggal_sort": get_tanggal_sort(tanggal)
                     })
                     ids.append(f"{filename}_{idx}")
 
@@ -135,18 +116,11 @@ def load_data_from_json():
                     if links:
                         link_text += "\nDokumen Terkait/Download:"
                         for link in links:
-                            judul_link = link.get('judul', 'Dokumen')
-                            url_link = link.get('url', '#')
-                            link_text += f"\n- {judul_link}: {url_link}"
+                            link_text += f"\n- {link.get('judul', 'Dokumen')}: {link.get('url', '#')}"
 
-                    text_content = (
-                        f"Topik: {sub_topik} ({kategori_utama}).\n"
-                        f"Penjelasan: {deskripsi}\n"
-                        f"{detail_text}"
-                        f"{link_text}"
-                    )
+                    text_content = f"Topik: {sub_topik} ({kategori_utama}).\nPenjelasan: {deskripsi}\n{detail_text}{link_text}"
 
-                    documents.append(f"passage: {text_content}")
+                    documents.append(text_content)
                     metadatas.append({
                         "source": filename,
                         "type": "prosedur",
@@ -159,11 +133,15 @@ def load_data_from_json():
     return documents, metadatas, ids
 
 def main():
-    print("\n🚀 STARTING BAAK AI TRAINING (SORTING FIXED)...")
+    print(f"\n🚀 STARTING BAAK AI TRAINING with {MODEL_NAME}...")
     
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"⚡ Running on device: {device.upper()}")
+
     if os.path.exists(DB_PATH):
         try:
             shutil.rmtree(DB_PATH)
+            print("🗑️  Old database removed.")
         except Exception as e:
             print(f"Warning: Could not delete folder: {e}")
 
@@ -175,11 +153,16 @@ def main():
     client = chromadb.PersistentClient(path=DB_PATH)
     collection = client.create_collection(name=COLLECTION_NAME)
 
-    model = SentenceTransformer(MODEL_NAME)
-    embeddings = model.encode(docs, show_progress_bar=True).tolist()
-
+    print("⏳ Loading Embedding Model...")
+    model = SentenceTransformer(MODEL_NAME, device=device)
+    
     batch_size = 100
-    for i in range(0, len(docs), batch_size):
+    print(f"📊 Generating Embeddings for {len(docs)} documents...")
+    
+    embeddings = model.encode(docs, batch_size=batch_size, show_progress_bar=True, normalize_embeddings=True).tolist()
+
+    print("💾 Saving to ChromaDB...")
+    for i in tqdm(range(0, len(docs), batch_size), desc="Inserting to DB"):
         collection.add(
             documents=docs[i:i+batch_size],
             embeddings=embeddings[i:i+batch_size],

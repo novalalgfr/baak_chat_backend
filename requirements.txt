@@ -1,8 +1,10 @@
 chromadb
 sentence-transformers
+torch
 numpy<2.0
 tqdm
 fastapi
 uvicorn
 pydantic
 groq
+python-dotenv
