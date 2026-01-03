@@ -10,3 +10,6 @@ __pycache__/
 chroma_db/
 
 .DS_Store
+
+HASIL_TESTING_LENGKAP.md
+test_bot.py
